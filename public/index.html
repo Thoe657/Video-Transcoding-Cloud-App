@@ -1,0 +1,717 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Video Transcoder</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  input, select, button { margin: 5px 0; display: block; }
+  .hidden { display: none; }
+  .choice-btn { margin-right: 10px; }
+  .downloads-header { display: flex; align-items: center; gap: 16px; margin-top: 20px; }
+  .downloads-header h2 { margin: 0; }
+  .downloads-header label { font-weight: normal; display: flex; align-items: center; gap: 8px; }
+  .downloads-header select { display: inline-block; margin: 0; }
+  .mfa-actions { display: flex; gap: 10px; margin-top: 10px; }
+  #mfaSecretContainer p { margin: 5px 0; }
+  #mfaSetupSection { margin-top: 20px; }
+  #mfaSetupDetails a { word-break: break-all; }
+  #mfaQrContainer, #mfaSetupQrContainer { margin-top: 10px; }
+  .mfa-qr { max-width: 220px; width: 100%; height: auto; border: 1px solid #ccc; padding: 6px; background: #fff; }
+  table { border-collapse: collapse; margin-top: 10px; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+</style>
+</head>
+<body>
+<h1>Video Transcoder</h1>
+
+<!-- Choice -->
+<div id="choiceDiv">
+  <button class="choice-btn" onclick="showRegister()">Register</button>
+  <button class="choice-btn" onclick="showLogin()">Login</button>
+</div>
+
+<!-- Register -->
+<div id="registerDiv" class="hidden">
+  <h2>Register</h2>
+  <input id="regUsername" placeholder="Username">
+  <input id="regEmail" placeholder="Email">
+  <input id="regPassword" type="password" placeholder="Password">
+  <button onclick="register()">Register</button>
+  <button onclick="hideRegister()">Back</button>
+  <p id="regMessage"></p>
+</div>
+
+<!-- Verify -->
+<div id="verifyDiv" class="hidden">
+  <h2>Verify Account</h2>
+  <input id="verifyUsername" placeholder="Username">
+  <input id="verifyCode" placeholder="Verification Code">
+  <button onclick="verify()">Verify</button>
+  <p id="verifyMessage"></p>
+</div>
+
+<!-- Login -->
+<div id="loginDiv" class="hidden">
+  <h2>Login</h2>
+  <input id="loginUsername" placeholder="Username">
+  <input id="loginPassword" type="password" placeholder="Password">
+  <button onclick="login()">Login</button>
+  <button onclick="hideLogin()">Back</button>
+  <p id="loginMessage"></p>
+</div>
+
+<!-- MFA Challenge -->
+<div id="mfaChallengeDiv" class="hidden">
+  <h2>Multi-Factor Authentication</h2>
+  <div id="mfaSecretContainer" class="hidden">
+    <p>Scan this secret with your authenticator app:</p>
+    <p><strong id="mfaSecretCode"></strong></p>
+    <p><a id="mfaOtpauthLink" href="#" target="_blank">Open in authenticator</a></p>
+    <div id="mfaQrContainer"></div>
+  </div>
+  <input id="mfaCodeInput" placeholder="Enter 6-digit code">
+  <div class="mfa-actions">
+    <button onclick="submitMfaChallenge()">Verify Code</button>
+    <button onclick="cancelMfaChallenge()">Back to Login</button>
+  </div>
+  <p id="mfaChallengeMessage"></p>
+</div>
+
+<!-- App -->
+<div id="appDiv" class="hidden">
+    <div id="mfaSetupSection">
+    <button id="mfaSetupButton" onclick="startMfaSetup()">Generate MFA Secret</button>
+    <div id="mfaSetupDetails" class="hidden">
+      <p>Secret: <strong id="mfaSetupSecret"></strong></p>
+      <p><a id="mfaSetupOtpauth" href="#" target="_blank">Open in authenticator</a></p>
+      <div id="mfaSetupQrContainer"></div>
+      <input id="mfaSetupCodeInput" placeholder="Enter 6-digit code">
+      <button onclick="confirmMfaSetup()">Confirm</button>
+      <button onclick="hideMfaSetupSecret()">Hide</button>
+      <p id="mfaSetupMessage"></p>
+    </div>
+  </div>
+  <h2>Upload Videos</h2>
+  <input type="file" id="videoFiles" multiple>
+  <button onclick="uploadVideos()">Upload</button>
+  <p id="status"></p>
+
+  <h2>Uploaded Files</h2>
+  <div id="uploadedFilesContainer"></div>
+
+  <button onclick="startTranscode()">Transcode Selected Videos</button>
+  <div id="statusContainer"></div>
+
+  <div class="downloads-header">
+    <h2>Your Transcoded Files</h2>
+    <label>Sort by:
+      <select id="downloadSort">
+        <option value="date-desc">Newest first</option>
+        <option value="date-asc">Oldest first</option>
+        <option value="name-asc">Filename A-Z</option>
+        <option value="name-desc">Filename Z-A</option>
+      </select>
+    </label>
+  </div>
+  <div id="downloads"></div>
+</div>
+
+<script>
+const API = "http://localhost:3000"//"http://13.236.179.55:3000";
+const TARGET_FORMAT = "avi";
+let token = "";
+let accessToken = "";
+let currentUsername = "";
+let pendingMfa = null;
+let downloads = [];
+let userRole = "user";
+let mfaEnabled = false;
+
+document.addEventListener("DOMContentLoaded", () => {
+  const sortSelect = document.getElementById("downloadSort");
+  if (sortSelect) {
+    sortSelect.addEventListener("change", renderDownloads);
+  }
+  renderDownloads();
+  showChoice();
+});
+
+function hideAll() {
+  ["choiceDiv","registerDiv","verifyDiv","loginDiv","mfaChallengeDiv","appDiv"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add("hidden");
+  });
+}
+
+function showChoice() {
+  hideAll();
+  document.getElementById("choiceDiv").classList.remove("hidden");
+  updateMfaStatus();
+}
+function showRegister() { hideAll(); document.getElementById("registerDiv").classList.remove("hidden"); }
+function hideRegister() { showChoice(); }
+function showLogin() { hideAll(); document.getElementById("loginDiv").classList.remove("hidden"); }
+function hideLogin() { showChoice(); }
+
+async function register() {
+  const username = document.getElementById("regUsername").value.trim();
+  const email = document.getElementById("regEmail").value.trim();
+  const password = document.getElementById("regPassword").value;
+  const message = document.getElementById("regMessage");
+  message.textContent = "";
+
+  try {
+    const res = await fetch(`${API}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, email })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Registration failed");
+
+    message.textContent = data.message;
+    document.getElementById("verifyUsername").value = username;
+    hideRegister();
+    document.getElementById("verifyDiv").classList.remove("hidden");
+  } catch (err) {
+    message.textContent = err.message;
+  }
+}
+
+async function verify() {
+  const username = document.getElementById("verifyUsername").value.trim();
+  const code = document.getElementById("verifyCode").value.trim();
+  const message = document.getElementById("verifyMessage");
+  message.textContent = "";
+
+  try {
+    const res = await fetch(`${API}/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, code })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Verification failed");
+
+    message.textContent = data.message;
+    hideAll();
+    document.getElementById("loginDiv").classList.remove("hidden");
+  } catch (err) {
+    message.textContent = err.message;
+  }
+}
+
+async function login() {
+  const username = document.getElementById("loginUsername").value.trim();
+  const password = document.getElementById("loginPassword").value;
+  const message = document.getElementById("loginMessage");
+  message.textContent = "";
+
+  currentUsername = username;
+
+  try {
+    const res = await fetch(`${API}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Login failed");
+
+    userRole = data.role || userRole;
+    updateMfaStatus(data.mfaEnabled);
+
+    if (data.challenge) {
+      pendingMfa = {
+        username,
+        session: data.session,
+        challenge: data.challenge
+      };
+
+      resetMfaChallengeUI();
+      hideAll();
+      document.getElementById("mfaChallengeDiv").classList.remove("hidden");
+
+      if (data.challenge === "MFA_SETUP") {
+        await beginLoginMfaEnrollment();
+      } else {
+        document.getElementById("mfaChallengeMessage").textContent = "Enter the code from your authenticator app.";
+      }
+
+      return;
+    }
+
+    completeLoginWithTokens(data, username);
+  } catch (err) {
+    message.textContent = err.message;
+  }
+}
+
+
+function completeLoginWithTokens(data, username) {
+  if (!data || !data.idToken) {
+    const messageEl = document.getElementById("loginMessage");
+    if (messageEl) messageEl.textContent = "Login response missing tokens.";
+    return;
+  }
+
+  token = data.idToken;
+  accessToken = data.accessToken || "";
+  currentUsername = username;
+  pendingMfa = null;
+  userRole = data.role || userRole;
+  updateMfaStatus(data.mfaEnabled);
+
+  const setupDetails = document.getElementById("mfaSetupDetails");
+  if (setupDetails) setupDetails.classList.add("hidden");
+  const setupMsg = document.getElementById("mfaSetupMessage");
+  if (setupMsg) setupMsg.textContent = "";
+  renderQrImage("mfaSetupQrContainer", "");
+
+  displayMfaSecret();
+  const challengeMsg = document.getElementById("mfaChallengeMessage");
+  if (challengeMsg) challengeMsg.textContent = "";
+  const codeInput = document.getElementById("mfaCodeInput");
+  if (codeInput) codeInput.value = "";
+
+  hideAll();
+  document.getElementById("appDiv").classList.remove("hidden");
+  loadUploads();
+  loadDownloads();
+}
+
+function renderQrImage(containerId, dataUrl) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  if (dataUrl) {
+    container.innerHTML = "";
+    const img = document.createElement("img");
+    img.src = dataUrl;
+    img.alt = "Authenticator QR code";
+    img.className = "mfa-qr";
+    img.decoding = "async";
+    img.loading = "lazy";
+    container.appendChild(img);
+  } else {
+    container.innerHTML = "";
+  }
+}
+function updateMfaStatus(enabled) {
+  const statusWrapper = document.getElementById("mfaStatus");
+  if (enabled === undefined || enabled === null) {
+    mfaEnabled = false;
+    if (statusWrapper) statusWrapper.classList.add("hidden");
+    return;
+  }
+
+  mfaEnabled = Boolean(enabled);
+  if (statusWrapper) statusWrapper.classList.remove("hidden");
+}
+
+
+function displayMfaSecret(secretCode, otpauthUrl, qrCodeDataUrl) {
+  const container = document.getElementById("mfaSecretContainer");
+  if (!container) return;
+
+  const secretEl = document.getElementById("mfaSecretCode");
+  const link = document.getElementById("mfaOtpauthLink");
+
+  if (secretCode) {
+    container.classList.remove("hidden");
+    if (secretEl) secretEl.textContent = secretCode;
+    if (link) {
+      if (otpauthUrl) {
+        link.href = otpauthUrl;
+        link.textContent = "Open in authenticator";
+      } else {
+        link.href = "#";
+        link.textContent = "Manual entry";
+      }
+    }
+  } else {
+    container.classList.add("hidden");
+    if (secretEl) secretEl.textContent = "";
+    if (link) {
+      link.href = "#";
+      link.textContent = "Open in authenticator";
+    }
+  }
+
+  renderQrImage("mfaQrContainer", secretCode && qrCodeDataUrl ? qrCodeDataUrl : "");
+}
+
+function hideMfaSetupSecret() {
+  renderQrImage("mfaSetupQrContainer", "");
+  const details = document.getElementById("mfaSetupDetails");
+  if (details) details.classList.add("hidden");
+  const secretEl = document.getElementById("mfaSetupSecret");
+  if (secretEl) secretEl.textContent = "Hidden";
+  const link = document.getElementById("mfaSetupOtpauth");
+  if (link) {
+    link.href = "#";
+    link.textContent = "Secret hidden";
+  }
+}
+
+function resetMfaChallengeUI() {
+  document.getElementById("mfaCodeInput").value = "";
+  document.getElementById("mfaChallengeMessage").textContent = "";
+  displayMfaSecret();
+}
+
+async function beginLoginMfaEnrollment() {
+  if (!pendingMfa) return;
+
+  try {
+    const res = await fetch(`${API}/mfa/associate-session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: pendingMfa.session, username: pendingMfa.username })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to begin MFA setup");
+
+    pendingMfa.session = data.session;
+    displayMfaSecret(data.secretCode, data.otpauthUrl, data.qrCodeDataUrl);
+    document.getElementById("mfaChallengeMessage").textContent = "Scan the secret, then enter the first code.";
+  } catch (err) {
+    document.getElementById("mfaChallengeMessage").textContent = err.message;
+  }
+}
+
+async function submitMfaChallenge() {
+  if (!pendingMfa) {
+    document.getElementById("mfaChallengeMessage").textContent = "No MFA challenge in progress.";
+    return;
+  }
+
+  const codeInput = document.getElementById("mfaCodeInput");
+  const code = codeInput.value.trim();
+  if (!code) {
+    document.getElementById("mfaChallengeMessage").textContent = "Enter the verification code.";
+    return;
+  }
+
+  const payload = { username: pendingMfa.username, session: pendingMfa.session, code };
+  const url = pendingMfa.challenge === "MFA_SETUP" ? `${API}/mfa/verify-session` : `${API}/mfa/challenge`;
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Verification failed");
+
+    if (data.challenge) {
+      pendingMfa.session = data.session;
+      pendingMfa.challenge = data.challenge;
+      codeInput.value = "";
+      if (data.challenge === "SOFTWARE_TOKEN_MFA") {
+        displayMfaSecret();
+      }
+      document.getElementById("mfaChallengeMessage").textContent = "Another verification step is required. Enter the code again.";
+      return;
+    }
+
+    codeInput.value = "";
+    completeLoginWithTokens(data, pendingMfa.username);
+  } catch (err) {
+    document.getElementById("mfaChallengeMessage").textContent = err.message;
+  }
+}
+
+function cancelMfaChallenge() {
+  pendingMfa = null;
+  resetMfaChallengeUI();
+  hideAll();
+  document.getElementById("loginDiv").classList.remove("hidden");
+}
+
+async function startMfaSetup() {
+  const status = document.getElementById("mfaSetupMessage");
+  if (status) status.textContent = "";
+  renderQrImage("mfaSetupQrContainer", "");
+
+  if (!accessToken) {
+    if (status) status.textContent = "Re-login to configure MFA.";
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/mfa/associate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+      },
+      body: JSON.stringify({ accessToken })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to generate secret");
+
+    const secretEl = document.getElementById("mfaSetupSecret");
+    const link = document.getElementById("mfaSetupOtpauth");
+    if (secretEl) secretEl.textContent = data.secretCode;
+    if (link) {
+      link.href = data.otpauthUrl;
+      link.textContent = "Open in authenticator";
+    }
+
+    renderQrImage("mfaSetupQrContainer", data.qrCodeDataUrl);
+
+    const details = document.getElementById("mfaSetupDetails");
+    if (details) details.classList.remove("hidden");
+    if (status) status.textContent = "Secret generated. Add it to your authenticator app, then enter a code below.";
+  } catch (err) {
+    if (status) status.textContent = err.message;
+  }
+}
+
+async function confirmMfaSetup() {
+  const status = document.getElementById("mfaSetupMessage");
+  if (status) status.textContent = "";
+  const codeInput = document.getElementById("mfaSetupCodeInput");
+  const code = codeInput.value.trim();
+
+  if (!code) {
+    if (status) status.textContent = "Enter the code from your authenticator.";
+    return;
+  }
+
+  if (!accessToken) {
+    if (status) status.textContent = "Re-login to configure MFA.";
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/mfa/verify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token
+      },
+      body: JSON.stringify({ accessToken, code })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to enable MFA");
+
+    if (status) status.textContent = data.message || "MFA enabled. You will need the authenticator code on your next login.";
+    codeInput.value = "";
+  } catch (err) {
+    if (status) status.textContent = err.message;
+  }
+}
+
+async function uploadVideos() {
+  const input = document.getElementById("videoFiles");
+  const status = document.getElementById("status");
+  status.textContent = "Uploading...";
+
+  for (const file of input.files) {
+    try {
+      const res = await fetch(`${API}/upload`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token
+        },
+        body: JSON.stringify({ filename: file.name, contentType: file.type })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to get upload URL");
+
+      await fetch(data.uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type },
+        body: file
+      });
+    } catch (err) {
+      status.textContent = `Error uploading ${file.name}: ${err.message}`;
+      return;
+    }
+  }
+
+  status.textContent = "Upload complete!";
+  await loadUploads();
+}
+
+async function loadUploads() {
+  const container = document.getElementById("uploadedFilesContainer");
+  container.innerHTML = "";
+
+  try {
+    const res = await fetch(`${API}/uploads`, {
+      headers: { "Authorization": "Bearer " + token }
+    });
+    if (!res.ok) throw new Error("Failed to fetch uploads");
+    const data = await res.json();
+    userRole = data.role || userRole;
+    const rows = data.uploads || [];
+
+    if (rows.length === 0) {
+      container.textContent = "No uploads yet.";
+      return;
+    }
+
+    const isAdmin = userRole === "admin";
+    const table = document.createElement("table");
+    const header = isAdmin
+      ? "<tr><th>Select</th><th>User</th><th>Filename</th></tr>"
+      : "<tr><th>Select</th><th>Filename</th></tr>";
+    const rowsHtml = rows.map(video => {
+      const ownerCell = isAdmin ? `<td>${video.user_id}</td>` : "";
+      return `
+        <tr>
+          <td><input type=\"checkbox\" value=\"${video.id}\" data-filename=\"${video.filename}\"></td>
+          ${ownerCell}
+          <td>${video.filename}</td>
+        </tr>
+      `;
+    }).join("");
+    table.innerHTML = header + rowsHtml;
+    container.appendChild(table);
+  } catch (err) {
+    container.textContent = err.message;
+  }
+}
+
+
+async function startTranscode() {
+  const container = document.getElementById("statusContainer");
+  container.innerHTML = "";
+  const selected = Array.from(document.querySelectorAll("#uploadedFilesContainer input[type='checkbox']:checked"));
+
+  if (selected.length === 0) {
+    const p = document.createElement("p");
+    p.textContent = "Select at least one video to transcode.";
+    container.appendChild(p);
+    return;
+  }
+
+  for (const checkbox of selected) {
+    const filename = checkbox.dataset.filename || `Video ${checkbox.value}`;
+    const statusLine = document.createElement("p");
+    statusLine.textContent = `Transcoding ${filename}...`;
+    container.appendChild(statusLine);
+
+    try {
+      const res = await fetch(`${API}/transcode`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token
+        },
+        body: JSON.stringify({ videoId: checkbox.value, format: TARGET_FORMAT })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Transcoding failed");
+      statusLine.textContent = `Transcode complete for ${filename}.`;
+    } catch (err) {
+      statusLine.textContent = `Error transcoding ${filename}: ${err.message}`;
+    }
+  }
+
+  await loadDownloads();
+}
+
+async function loadDownloads() {
+  const container = document.getElementById("downloads");
+  container.innerHTML = "";
+
+  try {
+    const res = await fetch(`${API}/files`, {
+      headers: { "Authorization": "Bearer " + token }
+    });
+    if (!res.ok) throw new Error("Failed to fetch downloads");
+    const data = await res.json();
+    userRole = data.role || userRole;
+    downloads = Array.isArray(data.files) ? data.files : [];
+    renderDownloads();
+  } catch (err) {
+    container.textContent = err.message;
+  }
+}
+
+function renderDownloads() {
+  const container = document.getElementById("downloads");
+  if (!container) return;
+
+  if (!downloads || downloads.length === 0) {
+    container.innerHTML = "<p>No transcoded files yet.</p>";
+    return;
+  }
+
+  const sortSelect = document.getElementById("downloadSort");
+  const sort = sortSelect ? sortSelect.value : "date-desc";
+  const items = downloads.slice();
+
+  const getTime = value => {
+    if (!value) return 0;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+  };
+
+  items.sort((a, b) => {
+    switch (sort) {
+      case "date-asc":
+        return getTime(a.completedAt) - getTime(b.completedAt);
+      case "name-asc":
+        return (a.filename || "").localeCompare(b.filename || "");
+      case "name-desc":
+        return (b.filename || "").localeCompare(a.filename || "");
+      case "date-desc":
+      default:
+        return getTime(b.completedAt) - getTime(a.completedAt);
+    }
+  });
+
+  const isAdmin = userRole === "admin";
+  const table = document.createElement("table");
+  const header = isAdmin
+    ? "<tr><th>Filename</th><th>User</th><th>Completed</th><th>Download</th></tr>"
+    : "<tr><th>Filename</th><th>Completed</th><th>Download</th></tr>";
+  const rowsHtml = items.map(file => {
+    const ownerCell = isAdmin ? `<td>${file.owner || currentUsername}</td>` : "";
+    return `
+      <tr>
+        <td>${file.filename || "Unknown"}</td>
+        ${ownerCell}
+        <td>${formatDownloadDate(file.completedAt)}</td>
+        <td><a href="${file.downloadUrl}" target="_blank">Download</a></td>
+      </tr>
+    `;
+  }).join("");
+
+  table.innerHTML = header + rowsHtml;
+  container.innerHTML = "";
+  container.appendChild(table);
+}
+
+function formatDownloadDate(value) {
+  if (!value) return "Unknown";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+}
+window.showRegister = showRegister;
+window.hideRegister = hideRegister;
+window.showLogin = showLogin;
+window.hideLogin = hideLogin;
+window.register = register;
+window.verify = verify;
+window.login = login;
+window.submitMfaChallenge = submitMfaChallenge;
+window.cancelMfaChallenge = cancelMfaChallenge;
+window.startMfaSetup = startMfaSetup;
+window.confirmMfaSetup = confirmMfaSetup;
+window.uploadVideos = uploadVideos;
+window.startTranscode = startTranscode;
+window.hideMfaSetupSecret = hideMfaSetupSecret;
+</script>
+</body>
+</html>
+
+
