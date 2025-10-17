@@ -10,6 +10,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 import pLimit from "p-limit";
 import { initDb as connectDb, query } from "./db.js";
 import { initS3, generatePresignedUploadKey, generatePresignedDownloadKey } from "./s3.js";
+import { initQueue, enqueueTranscode } from "./queue.js";
 import {
   registerUser,
   confirmUser,
@@ -23,17 +24,13 @@ import {
 } from "./auth.js";
 import { createRemoteJWKSet, jwtVerify, decodeJwt } from "jose";
 import QRCode from "qrcode";
-import { SSMClient, GetParametersCommand, DescribeParametersCommand } from "@aws-sdk/client-ssm";
+import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 //non-sensitive required env variables
 const defaultAwsRegion = "ap-southeast-2";
 const parameterPath =  "/11977132/videoapp/param/";
-const secretIdList = ("arn:aws:secretsmanager:ap-southeast-2:901444280953:secret:n11977132-videoapp-secrets-gD6xGE")
-  .split(",")
-  .map(id => id.trim())
-  .filter(Boolean);
 const ssm = new SSMClient({ region: defaultAwsRegion });
 const secretsManager = new SecretsManagerClient({ region: defaultAwsRegion });
 
@@ -50,36 +47,13 @@ function chunkArray(items, size) {
   return result;
 }
 
-async function listParameterNames(path) {
-  const names = new Set();
-  if (!path) return names;
-  try {
-    let nextToken;
-    do {
-      const command = new DescribeParametersCommand({
-        ParameterFilters: [{
-          Key: "Path",
-          Values: [path],
-          Option: "Recursive"
-        }],
-        NextToken: nextToken
-      });
-      const response = await ssm.send(command);
-      for (const param of response.Parameters || []) {
-        if (param?.Name) names.add(param.Name);
-      }
-      nextToken = response.NextToken;
-    } while (nextToken);
-  } catch (err) {
-    console.warn(`Parameter Store describe skipped: ${err.name || err.code || "Error"} - ${err.message}`);
-  }
-  return names;
-}
-
-async function loadParametersFromStore(path) {
+async function loadParametersFromStore(path, keys = []) {
   if (!path) return {};
   const parameters = {};
-  const names = Array.from(await listParameterNames(path));
+  const normalisedPath = path.endsWith("/") ? path : `${path}/`;
+  const names = keys.length
+    ? keys.map(key => `${normalisedPath}${key}`)
+    : [];
   if (names.length === 0) return parameters;
   const chunks = chunkArray(names, 10);
   for (const group of chunks) {
@@ -132,22 +106,72 @@ async function loadSecretsFromManager(secretIds) {
   return values;
 }
 
-const parameterValues = await loadParametersFromStore(parameterPath);
+const parameterKeys = [
+  "PGHOST",
+  "PGDATABASE",
+  "PGPORT",
+  "S3_BUCKET",
+  "COGNITO_USER_POOL_ID",
+  "COGNITO_CLIENT_ID",
+  "QUEUE_URL",
+  "SECRETS_ARN"
+];
+
+const parameterValues = await loadParametersFromStore(parameterPath, parameterKeys);
+
+function getEnvValue(key) {
+  const value = process.env[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+const secretArnSource = (() => {
+  const raw = parameterValues.SECRETS_ARN;
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim();
+  }
+  return getEnvValue("SECRETS_ARN");
+})();
+const secretIdList = secretArnSource
+  .split(",")
+  .map(id => id.trim())
+  .filter(Boolean);
+if (secretIdList.length === 0) {
+  console.warn("No Secrets Manager ARN provided; ensure SECRETS_ARN is set in SSM or env.");
+}
 const secretValues = await loadSecretsFromManager(secretIdList);
 const resolvedAwsRegion = "ap-southeast-2";
+function getParamValue(key) {
+  const param = parameterValues[key];
+  if (param !== undefined && param !== null) {
+    const trimmed = `${param}`.trim();
+    if (trimmed) return trimmed;
+  }
+  return getEnvValue(key);
+}
+
+function getSecretValue(key) {
+  const secret = secretValues[key];
+  if (secret !== undefined && secret !== null) {
+    const trimmed = `${secret}`.trim();
+    if (trimmed) return trimmed;
+  }
+  return getEnvValue(key);
+}
+
 const secrets = {
-  PGHOST: (parameterValues.PGHOST).trim(),
-  PGUSER: secretValues.PGUSER,
-  PGPASSWORD: secretValues.PGPASSWORD,
-  PGDATABASE: parameterValues.PGDATABASE,
-  PGPORT: parameterValues.PGPORT,
-  S3_BUCKET: (parameterValues.S3_BUCKET).trim(),
+  PGHOST: getParamValue("PGHOST"),
+  PGUSER: getSecretValue("PGUSER"),
+  PGPASSWORD: getSecretValue("PGPASSWORD"),
+  PGDATABASE: getParamValue("PGDATABASE"),
+  PGPORT: getParamValue("PGPORT"),
+  S3_BUCKET: getParamValue("S3_BUCKET"),
   AWS_REGION: resolvedAwsRegion,
-  COGNITO_USER_POOL_ID: parameterValues.COGNITO_USER_POOL_ID,
-  COGNITO_CLIENT_ID: parameterValues.COGNITO_CLIENT_ID,
-  COGNITO_CLIENT_SECRET: secretValues.COGNITO_CLIENT_SECRET,
-  JWT_SECRET: secretValues.JWT_SECRET,
-  PORT: Number(parameterValues.PORT) || 3000
+  COGNITO_USER_POOL_ID: getParamValue("COGNITO_USER_POOL_ID"),
+  COGNITO_CLIENT_ID: getParamValue("COGNITO_CLIENT_ID"),
+  COGNITO_CLIENT_SECRET: getSecretValue("COGNITO_CLIENT_SECRET"),
+  JWT_SECRET: getSecretValue("JWT_SECRET"),
+  PORT: Number(getParamValue("PORT")) || 3000,
+  QUEUE_URL: getParamValue("QUEUE_URL")
 };
 
 const dbConfig = {
@@ -162,6 +186,10 @@ const dbConfig = {
 
 await connectDb(dbConfig);
 initS3({ Bucket: secrets.S3_BUCKET, Region: secrets.AWS_REGION });
+if (!secrets.QUEUE_URL) {
+  console.warn("Warning: QUEUE_URL not set in Parameter Store; /transcode will fail to enqueue.");
+}
+initQueue({ region: secrets.AWS_REGION, queueUrl: secrets.QUEUE_URL });
 initCognito({
   clientId: secrets.COGNITO_CLIENT_ID,
   clientSecret: secrets.COGNITO_CLIENT_SECRET,
@@ -173,7 +201,7 @@ const CONCURRENT_TRANSCODES = 2;
 const transcodeLimit = pLimit(CONCURRENT_TRANSCODES);
 const s3 = new S3Client({ region: secrets.AWS_REGION });
 const bucket = secrets.S3_BUCKET;
-const MFA_ISSUER = parameterValues.MFA_ISSUER || process.env.MFA_ISSUER || "VideoApp";
+const MFA_ISSUER = getParamValue("MFA_ISSUER") || "VideoApp";
 
 const app = express();
 app.use(express.json());
@@ -538,43 +566,10 @@ app.post("/transcode", auth, async (req, res) => {
       return res.status(400).json({ error: "Only avi output is supported at this time" });
     }
 
-    const inputUrl = await getSignedUrl(
-      s3,
-      new GetObjectCommand({ Bucket: bucket, Key: videoKey }),
-      { expiresIn: 3600 }
-    );
-
-    const ffmpegCommand = ffmpeg()
-      .input(inputUrl)
-      .videoCodec("libxvid")
-      .audioCodec("libmp3lame")
-      .format(format)
-      .on("start", commandLine => console.log("FFmpeg command:", commandLine))
-      .on("stderr", line => console.log("FFmpeg stderr:", line.toString()))
-      .on("error", err => console.error("FFmpeg error:", err));
-
-    const ffmpegStream = ffmpegCommand.pipe();
-
-    const baseName = path.basename(videoKey, path.extname(videoKey));
-    const ownerId = (videoKey.split("/")[0] || req.user.username).trim();
-    const outputKey = `transcodes/${ownerId}/${baseName}.${format}`;
-    const outputContentType = format === "avi" ? "video/x-msvideo" : `video/${format}`;
-
-    const upload = new Upload({
-      client: s3,
-      params: {
-        Bucket: bucket,
-        Key: outputKey,
-        Body: ffmpegStream,
-        ContentType: outputContentType
-      }
-    });
-
-    await transcodeLimit(() => upload.done());
-
-    res.json({ message: "Transcode complete", key: outputKey });
+    await enqueueTranscode({ userId: req.user.username, videoKey, format });
+    res.status(202).json({ message: "Transcode queued" });
   } catch (err) {
-    console.error("Transcode failed:", err);
+    console.error("Enqueue failed:", err);
     res.status(500).json({ error: err.message });
   }
 });

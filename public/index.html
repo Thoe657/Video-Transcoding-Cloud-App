@@ -118,7 +118,12 @@
 </div>
 
 <script>
-const API = "http://localhost:3000"//"http://13.236.179.55:3000";
+const API = (() => {
+  if (window.location && window.location.origin && window.location.origin !== "file://") {
+    return window.location.origin.replace(/\/$/, "");
+  }
+  return "http://localhost:3000";
+})();
 const TARGET_FORMAT = "avi";
 let token = "";
 let accessToken = "";

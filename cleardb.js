@@ -1,8 +1,6 @@
 import { initDb, query } from "./db.js";
 import { initS3 } from "./s3.js";
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
-import dotenv from "dotenv";
-dotenv.config();
 
 // Load secrets
 const secrets = {

@@ -245,6 +245,11 @@ resource "aws_iam_role_policy" "app" {
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.parameter_path_prefix}/*"
       },
       {
+        Effect   = "Allow",
+        Action   = ["sqs:SendMessage"],
+        Resource = aws_sqs_queue.transcode.arn
+      },
+      {
         Effect = "Allow",
         Action = [ "secretsmanager:GetSecretValue" ],
         Resource = aws_secretsmanager_secret.app.arn
@@ -273,6 +278,35 @@ resource "aws_iam_role_policy" "app" {
       }
     ]
   })
+}
+
+###############################################################################
+# SQS for transcode jobs + DLQ
+###############################################################################
+
+resource "aws_sqs_queue" "transcode_dlq" {
+  name                      = "${var.environment}-video-app-transcode-dlq"
+  message_retention_seconds = 1209600
+  tags                      = var.tags
+}
+
+resource "aws_sqs_queue" "transcode" {
+  name                              = "${var.environment}-video-app-transcode"
+  visibility_timeout_seconds        = 300
+  message_retention_seconds         = 345600
+  receive_wait_time_seconds         = 20
+  redrive_policy                    = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.transcode_dlq.arn,
+    maxReceiveCount     = 5
+  })
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "queue_url" {
+  name  = "${var.parameter_path_prefix}/QUEUE_URL"
+  type  = "String"
+  value = aws_sqs_queue.transcode.id
+  tags  = var.tags
 }
 
 resource "aws_iam_instance_profile" "app" {

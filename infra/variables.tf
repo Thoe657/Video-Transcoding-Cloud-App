@@ -66,7 +66,7 @@ variable "app_port" {
 
 variable "parameter_path_prefix" {
   type    = string
-  default = "/n11977132/videoapp/param"
+  default = "/11977132/videoapp/param"
 }
 
 variable "secrets_name" {
@@ -77,4 +77,62 @@ variable "secrets_name" {
 variable "tags" {
   type    = map(string)
   default = { Project = "video-app" }
+}
+
+# ECS / ALB / Domain (for drafts below)
+variable "ecs_subnet_ids" {
+  description = "Subnets for ECS tasks"
+  type        = list(string)
+  default     = []
+}
+
+variable "alb_subnet_ids" {
+  description = "Public subnets for ALB"
+  type        = list(string)
+  default     = []
+}
+
+variable "api_desired_count" {
+  type    = number
+  default = 2
+}
+
+variable "worker_min_capacity" {
+  type    = number
+  default = 1
+}
+
+variable "worker_max_capacity" {
+  type    = number
+  default = 3
+}
+
+variable "api_image" {
+  description = "ECR image URI for API"
+  type        = string
+  default     = ""
+}
+
+variable "worker_image" {
+  description = "ECR image URI for Worker"
+  type        = string
+  default     = ""
+}
+
+variable "certificate_arn" {
+  description = "ACM cert ARN for the ALB listener"
+  type        = string
+  default     = ""
+}
+
+variable "domain_zone_id" {
+  description = "Route53 hosted zone ID"
+  type        = string
+  default     = ""
+}
+
+variable "domain_name" {
+  description = "Full domain name for API"
+  type        = string
+  default     = ""
 }
